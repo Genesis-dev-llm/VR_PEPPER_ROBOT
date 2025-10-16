@@ -6,21 +6,34 @@ Use this to test Pepper connectivity and responsiveness before VR testing.
 
 Controls:
 ---------
-MOVEMENT:
-  Arrow Keys    - Move base (Up=forward, Down=back, Left/Right=strafe)
-  Q/E           - Rotate left/right
-  SPACE         - Stop all movement
+TOGGLE MODE:
+  T             - Switch between CONTINUOUS (hold) and INCREMENTAL (click) modes
 
-HEAD:
-  W/S           - Head pitch (up/down)
-  A/D           - Head yaw (left/right)
+MOVEMENT (mode-dependent):
+  CONTINUOUS MODE (default):
+    Arrow Keys    - Hold to move (Up=forward, Down=back, Left/Right=strafe)
+    Q/E           - Hold to rotate left/right
+    SPACE         - Stop all movement
+  
+  INCREMENTAL MODE:
+    Arrow Keys    - Click to move 5cm per press
+    Q/E           - Click to rotate ~11° per press
+    Z             - Reset accumulated position to origin (0,0,0)
+
+HEAD (always incremental):
+  W/S           - Head pitch (up/down) in small steps
+  A/D           - Head yaw (left/right) in small steps
   R             - Reset head to center
 
-ARMS:
-  U/J           - Left shoulder pitch (up/down)
-  I/K           - Right shoulder pitch (up/down)
-  O/L           - Left/Right arms to side (shoulder roll)
+ARMS (always incremental, reads current position):
+  U/J           - Left shoulder pitch (U=up, J=down)
+  I/K           - Right shoulder pitch (I=up, K=down)
+  O             - Left arm OUT (extend sideways)
+  L             - Right arm OUT (extend sideways)
   
+  Note: Arms increment from CURRENT position, not absolute.
+  Each press moves the joint by ~0.1 radians (~6°)
+
 HANDS:
   [/]           - Open/Close left hand
   ;/'           - Open/Close right hand
@@ -33,12 +46,31 @@ SYSTEM:
   P             - Print robot status
   ESC           - Emergency stop and exit
 
+ARM LOGIC EXPLANATION:
+---------------------
+Pepper's arm joints work as follows:
+  - ShoulderPitch: Negative = arm up, Positive = arm down
+    Range: -2.0857 to 2.0857 radians (~-120° to +120°)
+  
+  - ShoulderRoll: Controls arm lateral movement
+    LEFT arm:  Positive = out (away from body), Range: 0.0087 to 1.5620
+    RIGHT arm: Negative = out (away from body), Range: -1.5620 to -0.0087
+  
+The keyboard controller:
+  1. Reads the CURRENT joint angle with getAngles()
+  2. Adds/subtracts a small step (0.1 radians)
+  3. Clamps to safe limits
+  4. Sends new angle with setAngles()
+
+This allows gradual, controlled movement from any starting position.
+
 Author: VR Pepper Teleoperation Team
 Date: October 2025
 """
 
 import qi
 import sys
+import os
 import threading
 import time
 import logging
@@ -63,10 +95,18 @@ class KeyboardPepperController:
         self.port = port
         self.running = True
         
-        # Movement state
+        # Movement mode toggle
+        self.continuous_mode = True  # True = hold to move, False = click to increment
+        
+        # Movement state (continuous mode)
         self.base_x = 0.0  # forward/back
         self.base_y = 0.0  # strafe
         self.base_theta = 0.0  # rotation
+        
+        # Accumulated position (incremental mode)
+        self.accumulated_x = 0.0
+        self.accumulated_y = 0.0
+        self.accumulated_theta = 0.0
         
         self.head_yaw = 0.0
         self.head_pitch = 0.0
@@ -76,6 +116,12 @@ class KeyboardPepperController:
         self.angular_speed = 0.5
         self.head_speed = 0.2
         self.arm_speed = 0.2
+        
+        # Incremental movement step sizes
+        self.linear_step = 0.05  # 5cm per press
+        self.angular_step = 0.2  # ~11 degrees per press
+        self.head_step = 0.1  # radians
+        self.arm_step = 0.1  # radians
         
         # Connect to robot
         logger.info(f"Connecting to Pepper at {ip}:{port}...")
@@ -120,8 +166,13 @@ class KeyboardPepperController:
         """Continuously update base movement (runs in background thread)."""
         while self.running:
             try:
-                if abs(self.base_x) > 0.01 or abs(self.base_y) > 0.01 or abs(self.base_theta) > 0.01:
-                    self.motion.moveToward(self.base_x, self.base_y, self.base_theta)
+                if self.continuous_mode:
+                    # Continuous movement mode - hold keys to move
+                    if abs(self.base_x) > 0.01 or abs(self.base_y) > 0.01 or abs(self.base_theta) > 0.01:
+                        self.motion.moveToward(self.base_x, self.base_y, self.base_theta)
+                else:
+                    # Incremental mode - doesn't use this loop
+                    self.motion.stopMove()
             except Exception as e:
                 logger.error(f"Movement update error: {e}")
             time.sleep(0.05)  # 20Hz update rate
@@ -129,54 +180,120 @@ class KeyboardPepperController:
     def on_press(self, key):
         """Handle key press events."""
         try:
+            # Toggle movement mode
+            if hasattr(key, 'char') and key.char == 't':
+                self.continuous_mode = not self.continuous_mode
+                mode = "CONTINUOUS (hold keys)" if self.continuous_mode else "INCREMENTAL (click to step)"
+                logger.info(f"Movement mode: {mode}")
+                if not self.continuous_mode:
+                    self._stop_all()  # Stop any continuous movement
+                return
+            
             # Movement controls
-            if key == Key.up:
-                self.base_x = self.linear_speed
-            elif key == Key.down:
-                self.base_x = -self.linear_speed
-            elif key == Key.left:
-                self.base_y = self.linear_speed
-            elif key == Key.right:
-                self.base_y = -self.linear_speed
-            elif hasattr(key, 'char'):
-                # Character keys
-                if key.char == 'q':
-                    self.base_theta = self.angular_speed
-                elif key.char == 'e':
-                    self.base_theta = -self.angular_speed
-                
-                # Head controls
-                elif key.char == 'w':
-                    self.head_pitch = min(0.5, self.head_pitch + 0.1)
+            if self.continuous_mode:
+                # CONTINUOUS MODE - Hold to move
+                if key == Key.up:
+                    self.base_x = self.linear_speed
+                elif key == Key.down:
+                    self.base_x = -self.linear_speed
+                elif key == Key.left:
+                    self.base_y = self.linear_speed
+                elif key == Key.right:
+                    self.base_y = -self.linear_speed
+                elif hasattr(key, 'char'):
+                    if key.char == 'q':
+                        self.base_theta = self.angular_speed
+                    elif key.char == 'e':
+                        self.base_theta = -self.angular_speed
+            else:
+                # INCREMENTAL MODE - Click to step
+                if key == Key.up:
+                    self.accumulated_x += self.linear_step
+                    self.motion.moveTo(self.accumulated_x, self.accumulated_y, self.accumulated_theta)
+                    logger.info(f"Step forward: position=({self.accumulated_x:.2f}, {self.accumulated_y:.2f})")
+                elif key == Key.down:
+                    self.accumulated_x -= self.linear_step
+                    self.motion.moveTo(self.accumulated_x, self.accumulated_y, self.accumulated_theta)
+                    logger.info(f"Step back: position=({self.accumulated_x:.2f}, {self.accumulated_y:.2f})")
+                elif key == Key.left:
+                    self.accumulated_y += self.linear_step
+                    self.motion.moveTo(self.accumulated_x, self.accumulated_y, self.accumulated_theta)
+                    logger.info(f"Step left: position=({self.accumulated_x:.2f}, {self.accumulated_y:.2f})")
+                elif key == Key.right:
+                    self.accumulated_y -= self.linear_step
+                    self.motion.moveTo(self.accumulated_x, self.accumulated_y, self.accumulated_theta)
+                    logger.info(f"Step right: position=({self.accumulated_x:.2f}, {self.accumulated_y:.2f})")
+                elif hasattr(key, 'char'):
+                    if key.char == 'q':
+                        self.accumulated_theta += self.angular_step
+                        self.motion.moveTo(self.accumulated_x, self.accumulated_y, self.accumulated_theta)
+                        logger.info(f"Rotate left: theta={self.accumulated_theta:.2f}")
+                    elif key.char == 'e':
+                        self.accumulated_theta -= self.angular_step
+                        self.motion.moveTo(self.accumulated_x, self.accumulated_y, self.accumulated_theta)
+                        logger.info(f"Rotate right: theta={self.accumulated_theta:.2f}")
+            
+            if hasattr(key, 'char'):
+                # Head controls (always incremental)
+                if key.char == 'w':
+                    self.head_pitch = min(0.5, self.head_pitch + self.head_step)
                     self.motion.setAngles("HeadPitch", self.head_pitch, self.head_speed)
+                    logger.info(f"Head up: pitch={self.head_pitch:.2f}")
                 elif key.char == 's':
-                    self.head_pitch = max(-0.6, self.head_pitch - 0.1)
+                    self.head_pitch = max(-0.6, self.head_pitch - self.head_step)
                     self.motion.setAngles("HeadPitch", self.head_pitch, self.head_speed)
+                    logger.info(f"Head down: pitch={self.head_pitch:.2f}")
                 elif key.char == 'a':
-                    self.head_yaw = min(2.0, self.head_yaw + 0.2)
+                    self.head_yaw = min(2.0, self.head_yaw + self.head_step)
                     self.motion.setAngles("HeadYaw", self.head_yaw, self.head_speed)
+                    logger.info(f"Head left: yaw={self.head_yaw:.2f}")
                 elif key.char == 'd':
-                    self.head_yaw = max(-2.0, self.head_yaw - 0.2)
+                    self.head_yaw = max(-2.0, self.head_yaw - self.head_step)
                     self.motion.setAngles("HeadYaw", self.head_yaw, self.head_speed)
+                    logger.info(f"Head right: yaw={self.head_yaw:.2f}")
                 elif key.char == 'r':
                     self.head_yaw = 0.0
                     self.head_pitch = 0.0
                     self.motion.setAngles(["HeadYaw", "HeadPitch"], [0.0, 0.0], self.head_speed)
                     logger.info("Head reset to center")
                 
-                # Arm controls
+                # Arm controls (incremental, each press moves arm)
                 elif key.char == 'u':
-                    self.motion.setAngles("LShoulderPitch", -0.5, self.arm_speed)
+                    # Left shoulder pitch UP
+                    current = self.motion.getAngles("LShoulderPitch", True)[0]
+                    new_angle = max(-2.0857, current - self.arm_step)
+                    self.motion.setAngles("LShoulderPitch", new_angle, self.arm_speed)
+                    logger.info(f"Left arm up: {new_angle:.2f}")
                 elif key.char == 'j':
-                    self.motion.setAngles("LShoulderPitch", 1.5, self.arm_speed)
+                    # Left shoulder pitch DOWN
+                    current = self.motion.getAngles("LShoulderPitch", True)[0]
+                    new_angle = min(2.0857, current + self.arm_step)
+                    self.motion.setAngles("LShoulderPitch", new_angle, self.arm_speed)
+                    logger.info(f"Left arm down: {new_angle:.2f}")
                 elif key.char == 'i':
-                    self.motion.setAngles("RShoulderPitch", -0.5, self.arm_speed)
+                    # Right shoulder pitch UP
+                    current = self.motion.getAngles("RShoulderPitch", True)[0]
+                    new_angle = max(-2.0857, current - self.arm_step)
+                    self.motion.setAngles("RShoulderPitch", new_angle, self.arm_speed)
+                    logger.info(f"Right arm up: {new_angle:.2f}")
                 elif key.char == 'k':
-                    self.motion.setAngles("RShoulderPitch", 1.5, self.arm_speed)
+                    # Right shoulder pitch DOWN
+                    current = self.motion.getAngles("RShoulderPitch", True)[0]
+                    new_angle = min(2.0857, current + self.arm_step)
+                    self.motion.setAngles("RShoulderPitch", new_angle, self.arm_speed)
+                    logger.info(f"Right arm down: {new_angle:.2f}")
                 elif key.char == 'o':
-                    self.motion.setAngles("LShoulderRoll", 0.3, self.arm_speed)
+                    # Left shoulder roll OUT (extend left arm sideways)
+                    current = self.motion.getAngles("LShoulderRoll", True)[0]
+                    new_angle = min(1.5620, current + self.arm_step)  # Positive = out
+                    self.motion.setAngles("LShoulderRoll", new_angle, self.arm_speed)
+                    logger.info(f"Left arm out: {new_angle:.2f}")
                 elif key.char == 'l':
-                    self.motion.setAngles("RShoulderRoll", -0.3, self.arm_speed)
+                    # Right shoulder roll OUT (extend right arm sideways)
+                    current = self.motion.getAngles("RShoulderRoll", True)[0]
+                    new_angle = max(-1.5620, current - self.arm_step)  # Negative = out
+                    self.motion.setAngles("RShoulderRoll", new_angle, self.arm_speed)
+                    logger.info(f"Right arm out: {new_angle:.2f}")
                 
                 # Hand controls
                 elif key.char == '[':
@@ -203,6 +320,12 @@ class KeyboardPepperController:
                 # System commands
                 elif key.char == 'p':
                     self._print_status()
+                elif key.char == 'z':
+                    # Reset accumulated position
+                    self.accumulated_x = 0.0
+                    self.accumulated_y = 0.0
+                    self.accumulated_theta = 0.0
+                    logger.info("Position reset to origin (0, 0, 0)")
                 
             # Space bar - stop
             elif key == Key.space:
@@ -224,14 +347,15 @@ class KeyboardPepperController:
     def on_release(self, key):
         """Handle key release events."""
         try:
-            # Stop base movement when keys released
-            if key == Key.up or key == Key.down:
-                self.base_x = 0.0
-            elif key == Key.left or key == Key.right:
-                self.base_y = 0.0
-            elif hasattr(key, 'char'):
-                if key.char in ['q', 'e']:
-                    self.base_theta = 0.0
+            # Only stop continuous movement when keys released
+            if self.continuous_mode:
+                if key == Key.up or key == Key.down:
+                    self.base_x = 0.0
+                elif key == Key.left or key == Key.right:
+                    self.base_y = 0.0
+                elif hasattr(key, 'char'):
+                    if key.char in ['q', 'e']:
+                        self.base_theta = 0.0
         except:
             pass
     
@@ -280,12 +404,23 @@ class KeyboardPepperController:
     
     def run(self):
         """Start the keyboard listener."""
+        mode_str = "CONTINUOUS (hold)" if self.continuous_mode else "INCREMENTAL (click)"
         print("\n" + "="*60)
-        print("  KEYBOARD CONTROLS - See docstring for full list")
+        print("  KEYBOARD CONTROLS")
         print("="*60)
-        print("  Arrow Keys: Move  |  Q/E: Rotate  |  Space: Stop")
-        print("  WASD: Head  |  U/I: Arms  |  [/]: Hands  |  1: Wave")
-        print("  P: Status  |  ESC: Quit")
+        print(f"  Movement Mode: {mode_str}")
+        print("  Press T to toggle between CONTINUOUS/INCREMENTAL")
+        print()
+        print("  CONTINUOUS MODE (hold keys):")
+        print("    Arrow Keys: Hold to move | Q/E: Hold to rotate")
+        print()
+        print("  INCREMENTAL MODE (click to step):")
+        print("    Arrow Keys: Click to move 5cm | Q/E: Click to rotate")
+        print("    Z: Reset position to origin")
+        print()
+        print("  Always available:")
+        print("    WASD: Head | U/I/J/K: Arms | O/L: Arms out")
+        print("    [/]/;/': Hands | 1: Wave | P: Status | ESC: Quit")
         print("="*60 + "\n")
         
         with keyboard.Listener(on_press=self.on_press, on_release=self.on_release) as listener:
@@ -296,12 +431,32 @@ class KeyboardPepperController:
 
 def main():
     """Main entry point."""
-    if len(sys.argv) < 2:
-        print("Usage: python test_keyboard_control.py <PEPPER_IP>")
-        print("Example: python test_keyboard_control.py 192.168.1.100")
-        sys.exit(1)
+    pepper_ip = None
     
-    pepper_ip = sys.argv[1]
+    # Try to get IP from command line
+    if len(sys.argv) >= 2:
+        pepper_ip = sys.argv[1]
+    # Try to load from saved file
+    elif os.path.exists(".pepper_ip"):
+        try:
+            with open(".pepper_ip", "r") as f:
+                pepper_ip = f.read().strip()
+            print(f"Using saved Pepper IP: {pepper_ip}")
+        except:
+            pass
+    
+    # If still no IP, ask user
+    if not pepper_ip:
+        print("No Pepper IP provided.")
+        print("\nOptions:")
+        print("  1. Run with IP: python test_keyboard_control.py 192.168.1.100")
+        print("  2. Enter IP now")
+        print()
+        pepper_ip = input("Enter Pepper's IP address: ").strip()
+        
+        if not pepper_ip:
+            print("No IP provided. Exiting.")
+            sys.exit(1)
     
     try:
         controller = KeyboardPepperController(pepper_ip)

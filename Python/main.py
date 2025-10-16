@@ -20,7 +20,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global configuration
-DEFAULT_ROBOT_IP = "192.168.1.100"
+DEFAULT_ROBOT_IP = "192.168.1.222"
 ROBOT_PORT = 9559
 COMMAND_PORT = 5000
 VIDEO_PORT = 8080
