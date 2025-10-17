@@ -13,7 +13,7 @@ public class PepperConnection : MonoBehaviour
     public static PepperConnection Instance { get; private set; }
 
     [Header("Network Settings")]
-    public string serverIp = "192.168.1.101"; // IMPORTANT: Change this to your PC's IP
+    public string serverIp = "192.168.1.129"; // IMPORTANT: Change this to your PC's IP
     public int serverPort = 5000;
 
     [Header("Connection Status")]

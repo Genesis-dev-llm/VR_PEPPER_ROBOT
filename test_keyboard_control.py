@@ -8,6 +8,7 @@ Controls:
 ---------
 TOGGLE MODE:
   T             - Switch between CONTINUOUS (hold) and INCREMENTAL (click) modes
+  V             - Toggle video feed window
 
 MOVEMENT (mode-dependent):
   CONTINUOUS MODE (default):
@@ -28,6 +29,8 @@ HEAD (always incremental):
 ARMS (always incremental, reads current position):
   U/J           - Left shoulder pitch (U=up, J=down)
   I/K           - Right shoulder pitch (I=up, K=down)
+  7/9           - Left elbow roll (7=bend, 9=straighten)
+  8/0           - Right elbow roll (8=bend, 0=straighten)
   O             - Left arm OUT (extend sideways)
   L             - Right arm OUT (extend sideways)
   
@@ -40,10 +43,11 @@ HANDS:
 
 PRE-MOTIONS:
   1             - Wave
-  2             - Dance (if implemented)
+  2             - Special Dance 😏
   
 SYSTEM:
   P             - Print robot status
+  V             - Toggle video feed window
   ESC           - Emergency stop and exit
 
 ARM LOGIC EXPLANATION:
@@ -56,6 +60,10 @@ Pepper's arm joints work as follows:
     LEFT arm:  Positive = out (away from body), Range: 0.0087 to 1.5620
     RIGHT arm: Negative = out (away from body), Range: -1.5620 to -0.0087
   
+  - ElbowRoll: Controls elbow bend
+    LEFT arm:  Negative = bent, Range: -1.5620 to -0.0087
+    RIGHT arm: Positive = bent, Range: 0.0087 to 1.5620
+
 The keyboard controller:
   1. Reads the CURRENT joint angle with getAngles()
   2. Adds/subtracts a small step (0.1 radians)
@@ -74,6 +82,9 @@ import os
 import threading
 import time
 import logging
+import urllib.request
+import cv2
+import numpy as np
 
 # Try to import keyboard library
 try:
@@ -94,6 +105,11 @@ class KeyboardPepperController:
         self.ip = ip
         self.port = port
         self.running = True
+        
+        # Video feed settings
+        self.show_video = False
+        self.video_url = f"http://{ip}:8080/video_feed"
+        self.video_thread = None
         
         # Movement mode toggle
         self.continuous_mode = True  # True = hold to move, False = click to increment
@@ -146,7 +162,7 @@ class KeyboardPepperController:
         self.update_thread.start()
         
         logger.info("🎮 Keyboard controller ready! Press keys to control Pepper.")
-        logger.info("    Press ESC to quit, P for status")
+        logger.info("    Press V to toggle video, ESC to quit, P for status")
     
     def _initialize_robot(self):
         """Prepare robot for control."""
@@ -176,6 +192,56 @@ class KeyboardPepperController:
             except Exception as e:
                 logger.error(f"Movement update error: {e}")
             time.sleep(0.05)  # 20Hz update rate
+    
+    def _video_display_loop(self):
+        """Display video feed from Pepper's camera."""
+        logger.info(f"Starting video display from {self.video_url}")
+        
+        try:
+            stream = urllib.request.urlopen(self.video_url, timeout=5)
+            bytes_data = b''
+            
+            while self.show_video and self.running:
+                try:
+                    bytes_data += stream.read(1024)
+                    a = bytes_data.find(b'\xff\xd8')  # JPEG start
+                    b = bytes_data.find(b'\xff\xd9')  # JPEG end
+                    
+                    if a != -1 and b != -1:
+                        jpg = bytes_data[a:b+2]
+                        bytes_data = bytes_data[b+2:]
+                        
+                        # Decode and display
+                        frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            cv2.imshow('Pepper Camera Feed (Press V to close)', frame)
+                            if cv2.waitKey(1) & 0xFF == ord('v'):
+                                self.show_video = False
+                                break
+                                
+                except Exception as e:
+                    logger.error(f"Video frame error: {e}")
+                    break
+                    
+        except Exception as e:
+            logger.error(f"Could not connect to video stream: {e}")
+            logger.error(f"Make sure the server is running: python Python/main.py --ip {self.ip}")
+        finally:
+            cv2.destroyAllWindows()
+            logger.info("Video display stopped")
+    
+    def _toggle_video(self):
+        """Toggle video feed window."""
+        self.show_video = not self.show_video
+        
+        if self.show_video:
+            # Start video thread
+            self.video_thread = threading.Thread(target=self._video_display_loop, daemon=True)
+            self.video_thread.start()
+            logger.info("✓ Video feed enabled (press V again to close)")
+        else:
+            logger.info("✓ Video feed disabled")
+            cv2.destroyAllWindows()
     
     def on_press(self, key):
         """Handle key press events."""
@@ -234,6 +300,11 @@ class KeyboardPepperController:
                         logger.info(f"Rotate right: theta={self.accumulated_theta:.2f}")
             
             if hasattr(key, 'char'):
+                # Toggle video feed
+                if key.char == 'v':
+                    self._toggle_video()
+                    return
+                
                 # Head controls (always incremental)
                 if key.char == 'w':
                     self.head_pitch = min(0.5, self.head_pitch + self.head_step)
@@ -295,6 +366,32 @@ class KeyboardPepperController:
                     self.motion.setAngles("RShoulderRoll", new_angle, self.arm_speed)
                     logger.info(f"Right arm out: {new_angle:.2f}")
                 
+                # Elbow controls (NEW - for better arm control)
+                elif key.char == '7':
+                    # Left elbow roll BEND
+                    current = self.motion.getAngles("LElbowRoll", True)[0]
+                    new_angle = max(-1.5620, current - self.arm_step)  # More negative = more bent
+                    self.motion.setAngles("LElbowRoll", new_angle, self.arm_speed)
+                    logger.info(f"Left elbow bent: {new_angle:.2f}")
+                elif key.char == '9':
+                    # Left elbow roll STRAIGHTEN
+                    current = self.motion.getAngles("LElbowRoll", True)[0]
+                    new_angle = min(-0.0087, current + self.arm_step)  # Less negative = straighter
+                    self.motion.setAngles("LElbowRoll", new_angle, self.arm_speed)
+                    logger.info(f"Left elbow straightened: {new_angle:.2f}")
+                elif key.char == '8':
+                    # Right elbow roll BEND
+                    current = self.motion.getAngles("RElbowRoll", True)[0]
+                    new_angle = min(1.5620, current + self.arm_step)  # More positive = more bent
+                    self.motion.setAngles("RElbowRoll", new_angle, self.arm_speed)
+                    logger.info(f"Right elbow bent: {new_angle:.2f}")
+                elif key.char == '0':
+                    # Right elbow roll STRAIGHTEN
+                    current = self.motion.getAngles("RElbowRoll", True)[0]
+                    new_angle = max(0.0087, current - self.arm_step)  # Less positive = straighter
+                    self.motion.setAngles("RElbowRoll", new_angle, self.arm_speed)
+                    logger.info(f"Right elbow straightened: {new_angle:.2f}")
+                
                 # Hand controls
                 elif key.char == '[':
                     self.motion.setAngles("LHand", 1.0, 0.3)
@@ -315,7 +412,9 @@ class KeyboardPepperController:
                     self.tts.say("Hello!")
                     self._wave()
                 elif key.char == '2':
-                    logger.info("Dance not implemented yet")
+                    logger.info("💃 Playing SPECIAL DANCE...")
+                    self.tts.say("Let's dance!")
+                    self._special_dance()
                 
                 # System commands
                 elif key.char == 'p':
@@ -383,6 +482,61 @@ class KeyboardPepperController:
         
         self.posture.goToPosture("Stand", 0.5)
     
+    def _special_dance(self):
+        """Special dance animation - Pepper gets DOWN! 💃🕺"""
+        logger.info("🎵 Pepper is about to DROP IT! 🎵")
+        
+        # Enable full body stiffness
+        self.motion.setStiffnesses("Body", 1.0)
+        time.sleep(0.2)
+        
+        # Get LOW - hip movement simulation (Pepper doesn't have hips but we'll fake it)
+        # Use knee bend + lean
+        self.motion.setAngles("KneePitch", 0.5, 0.3)  # Bend knees
+        time.sleep(0.3)
+        
+        # The TWERK - rapid hip oscillation simulation
+        # We'll use head + torso coordination
+        for cycle in range(6):  # 6 cycles of twerking
+            # Down position - lean back slightly
+            self.motion.setAngles(["HipPitch", "HeadPitch"], [0.15, -0.2], 0.8)
+            time.sleep(0.15)
+            
+            # Up position - lean forward slightly  
+            self.motion.setAngles(["HipPitch", "HeadPitch"], [-0.15, 0.2], 0.8)
+            time.sleep(0.15)
+        
+        # Add some arm flair while twerking (last 4 cycles)
+        for cycle in range(4):
+            # Arms UP
+            self.motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [-1.0, -1.0], 0.6)
+            self.motion.setAngles(["HipPitch"], [0.15], 0.8)
+            time.sleep(0.15)
+            
+            # Arms DOWN  
+            self.motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [0.5, 0.5], 0.6)
+            self.motion.setAngles(["HipPitch"], [-0.15], 0.8)
+            time.sleep(0.15)
+        
+        # FINALE - Big move!
+        self.motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [-1.5, -1.5], 0.4)  # Arms way up
+        self.motion.setAngles("KneePitch", 0.8, 0.3)  # REALLY low
+        time.sleep(0.5)
+        
+        # Pop back up!
+        self.motion.setAngles("KneePitch", 0.0, 0.5)
+        time.sleep(0.3)
+        
+        # Victory pose
+        self.motion.setAngles(["LShoulderPitch", "RShoulderPitch", "LElbowRoll", "RElbowRoll"], 
+                            [-0.5, -0.5, -1.5, 1.5], 0.3)
+        time.sleep(0.5)
+        
+        # Return to normal
+        logger.info("💃 DANCE COMPLETE! Pepper's got MOVES!")
+        self.posture.goToPosture("Stand", 0.6)
+        time.sleep(1.0)
+    
     def _print_status(self):
         """Print current robot status."""
         try:
@@ -409,7 +563,8 @@ class KeyboardPepperController:
         print("  KEYBOARD CONTROLS")
         print("="*60)
         print(f"  Movement Mode: {mode_str}")
-        print("  Press T to toggle between CONTINUOUS/INCREMENTAL")
+        print("  Press T to toggle CONTINUOUS/INCREMENTAL")
+        print("  Press V to toggle VIDEO FEED")
         print()
         print("  CONTINUOUS MODE (hold keys):")
         print("    Arrow Keys: Hold to move | Q/E: Hold to rotate")
@@ -418,15 +573,21 @@ class KeyboardPepperController:
         print("    Arrow Keys: Click to move 5cm | Q/E: Click to rotate")
         print("    Z: Reset position to origin")
         print()
+        print("  Arms & Elbows:")
+        print("    U/I/J/K: Shoulder pitch | O/L: Shoulder roll (out)")
+        print("    7/9: Left elbow (bend/straight)")
+        print("    8/0: Right elbow (bend/straight)")
+        print()
         print("  Always available:")
-        print("    WASD: Head | U/I/J/K: Arms | O/L: Arms out")
-        print("    [/]/;/': Hands | 1: Wave | P: Status | ESC: Quit")
+        print("    WASD: Head | [/]/;/': Hands | 1: Wave | 2: Dance 💃")
+        print("    P: Status | V: Video | ESC: Quit")
         print("="*60 + "\n")
         
         with keyboard.Listener(on_press=self.on_press, on_release=self.on_release) as listener:
             listener.join()
         
         logger.info("Shutting down controller...")
+        cv2.destroyAllWindows()
         self.session.close()
 
 def main():

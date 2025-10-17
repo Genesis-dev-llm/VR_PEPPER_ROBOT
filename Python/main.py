@@ -20,7 +20,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global configuration
-DEFAULT_ROBOT_IP = "192.168.1.222"
+DEFAULT_ROBOT_IP = "10.55.195.182"
 ROBOT_PORT = 9559
 COMMAND_PORT = 5000
 VIDEO_PORT = 8080
@@ -97,6 +97,8 @@ async def main(robot_ip):
     logger.info("╚════════════════════════════════════════════════════════╝")
     logger.info("")
     
+    health_task = None
+    
     try:
         # 1. Initialize the main Pepper controller
         logger.info(f"Attempting to connect to Pepper at {robot_ip}:{ROBOT_PORT}...")
@@ -145,7 +147,7 @@ async def main(robot_ip):
         logger.error("  1. Pepper's IP address is correct")
         logger.error("  2. Pepper is powered on and ready")
         logger.error("  3. Both devices are on the same network")
-        logger.error("  4. Port 9559 is accessible: nc -zv {robot_ip} 9559")
+        logger.error(f"  4. Port 9559 is accessible: nc -zv {robot_ip} 9559")
     except Exception as e:
         logger.error(f"❌ FATAL ERROR during startup: {e}", exc_info=True)
         logger.error("Please check Pepper's IP address, network connection, and ensure NAOqi is running.")
@@ -193,7 +195,7 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py --ip 192.168.1.100
+  python main.py --ip 192.168.1.222
   python main.py --ip 10.0.0.50 --verbose
   
 Network Setup:
@@ -233,7 +235,7 @@ Network Setup:
     # Validate IP address
     if not validate_ip(args.ip):
         logger.error(f"❌ Invalid IP address format: {args.ip}")
-        logger.error("Expected format: XXX.XXX.XXX.XXX (e.g., 192.168.1.100)")
+        logger.error("Expected format: XXX.XXX.XXX.XXX (e.g., 192.168.1.222)")
         sys.exit(1)
     
     # Print network info
