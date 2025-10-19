@@ -26,7 +26,7 @@ class PreMotionPlayer:
 
         # Start the animation in a new thread
         motion_thread = threading.Thread(target=self._run_motion, args=(motion_name,))
-        motion_thread.daemon = True # Allows main program to exit even if thread is running
+        motion_thread.daemon = True  # Allows main program to exit even if thread is running
         motion_thread.start()
 
     def _run_motion(self, motion_name):
@@ -39,9 +39,8 @@ class PreMotionPlayer:
             # --- Animation Logic ---
             if motion_name == "wave":
                 self._wave_motion()
-            elif motion_name == "dance":
-                # TODO: Implement a dance animation
-                print("Dance motion not yet implemented.")
+            elif motion_name == "dance" or motion_name == "special_dance":
+                self._special_dance_motion()
             else:
                 print(f"Unknown pre-motion: {motion_name}")
         finally:
@@ -54,7 +53,7 @@ class PreMotionPlayer:
 
     def _wave_motion(self):
         """A simple, hard-coded wave animation sequence."""
-        self.motion.setStiffnesses("RARM", 1.0)
+        self.motion.setStiffnesses("RArm", 1.0)
         self.motion.setAngles("RShoulderPitch", -0.5, 0.2)
         time.sleep(0.5)
         self.motion.setAngles("RShoulderRoll", -1.2, 0.2)
@@ -67,3 +66,47 @@ class PreMotionPlayer:
             time.sleep(0.5)
             self.motion.setAngles("RWristYaw", 1.0, 0.4)
             time.sleep(0.5)
+    
+    def _special_dance_motion(self):
+        """Special dance animation - Pepper gets DOWN! 💃"""
+        print("🎵 SPECIAL DANCE MODE ACTIVATED! 🎵")
+        
+        # Enable full body stiffness
+        self.motion.setStiffnesses("Body", 1.0)
+        time.sleep(0.2)
+        
+        # Get LOW
+        self.motion.setAngles("KneePitch", 0.5, 0.3)
+        time.sleep(0.3)
+        
+        # The TWERK - rapid oscillation
+        for cycle in range(6):
+            self.motion.setAngles(["HipPitch", "HeadPitch"], [0.15, -0.2], 0.8)
+            time.sleep(0.15)
+            self.motion.setAngles(["HipPitch", "HeadPitch"], [-0.15, 0.2], 0.8)
+            time.sleep(0.15)
+        
+        # Arms + twerk combo
+        for cycle in range(4):
+            self.motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [-1.0, -1.0], 0.6)
+            self.motion.setAngles(["HipPitch"], [0.15], 0.8)
+            time.sleep(0.15)
+            self.motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [0.5, 0.5], 0.6)
+            self.motion.setAngles(["HipPitch"], [-0.15], 0.8)
+            time.sleep(0.15)
+        
+        # FINALE
+        self.motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [-1.5, -1.5], 0.4)
+        self.motion.setAngles("KneePitch", 0.8, 0.3)
+        time.sleep(0.5)
+        
+        # Pop back up
+        self.motion.setAngles("KneePitch", 0.0, 0.5)
+        time.sleep(0.3)
+        
+        # Victory pose
+        self.motion.setAngles(["LShoulderPitch", "RShoulderPitch", "LElbowRoll", "RElbowRoll"], 
+                            [-0.5, -0.5, -1.5, 1.5], 0.3)
+        time.sleep(0.5)
+        
+        print("💃 DANCE COMPLETE!")
