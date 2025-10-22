@@ -4,8 +4,7 @@ using System.Collections.Generic;
 
 /// <summary>
 /// Manages the WebSocket connection to the Python server.
-/// Acts as a central hub for sending commands to Pepper.
-/// Implemented as a Singleton to be easily accessible from any script.
+/// FIXED: Command queue clearing on disconnect, better thread safety
 /// </summary>
 public class PepperConnection : MonoBehaviour
 {
@@ -22,6 +21,7 @@ public class PepperConnection : MonoBehaviour
 
     private WebSocket websocket;
     private Queue<object> commandQueue = new Queue<object>();
+    private object queueLock = new object(); // FIXED: Added lock for thread safety
 
     void Awake()
     {
@@ -50,12 +50,16 @@ public class PepperConnection : MonoBehaviour
         }
         #endif
 
-        if (isConnected && commandQueue.Count > 0)
+        // FIXED: Thread-safe queue processing
+        if (isConnected)
         {
-            while (commandQueue.Count > 0)
+            lock (queueLock)
             {
-                var command = commandQueue.Dequeue();
-                SendCommandInternal(command);
+                while (commandQueue.Count > 0)
+                {
+                    var command = commandQueue.Dequeue();
+                    SendCommandInternal(command);
+                }
             }
         }
     }
@@ -76,7 +80,11 @@ public class PepperConnection : MonoBehaviour
         }
         else
         {
-            commandQueue.Enqueue(command);
+            // FIXED: Thread-safe queue access
+            lock (queueLock)
+            {
+                commandQueue.Enqueue(command);
+            }
             Debug.LogWarning("Connection is closed. Queuing command.");
         }
     }
@@ -101,12 +109,25 @@ public class PepperConnection : MonoBehaviour
         {
             Debug.LogError("<color=red>Connection Error:</color> " + e);
             isConnected = false;
+            
+            // FIXED: Clear queue on error
+            lock (queueLock)
+            {
+                commandQueue.Clear();
+            }
         };
 
         websocket.OnClose += (e) =>
         {
             Debug.Log("<color=orange>Connection closed.</color> Code: " + e);
             isConnected = false;
+            
+            // FIXED: Clear command queue on disconnect to prevent stale commands
+            lock (queueLock)
+            {
+                commandQueue.Clear();
+                Debug.Log("Command queue cleared on disconnect");
+            }
         };
 
         websocket.OnMessage += (bytes) =>
@@ -121,10 +142,17 @@ public class PepperConnection : MonoBehaviour
 
     private async void SendCommandInternal(object command)
     {
-        if (websocket.State == WebSocketState.Open)
+        if (websocket != null && websocket.State == WebSocketState.Open)
         {
-            string jsonCommand = JsonUtility.ToJson(command);
-            await websocket.SendText(jsonCommand);
+            try
+            {
+                string jsonCommand = JsonUtility.ToJson(command);
+                await websocket.SendText(jsonCommand);
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"Failed to send command: {e.Message}");
+            }
         }
     }
 }

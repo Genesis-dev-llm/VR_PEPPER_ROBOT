@@ -1,3 +1,8 @@
+"""
+Video Streamer - Flask-based video streaming from Pepper's camera
+FIXED: Better error handling, resource cleanup, memory management
+"""
+
 from flask import Flask, Response
 from flask_cors import CORS
 import qi
@@ -10,7 +15,7 @@ logger = logging.getLogger(__name__)
 class VideoStreamer:
     """
     Runs a Flask web server for video streaming from Pepper's camera.
-    Now uses qi framework instead of naoqi.
+    Uses qi framework instead of naoqi.
     """
     def __init__(self, ip, port, camera_id=0, resolution=2, fps=30):
         self.app = Flask(__name__)
@@ -30,15 +35,19 @@ class VideoStreamer:
         self._setup_routes()
 
     def _connect(self):
-        """Connect to Pepper and get video service using qi framework."""
+        """
+        Connect to Pepper and get video service using qi framework.
+        FIXED: Better exception handling.
+        """
         try:
             logger.info(f"Connecting to Pepper camera at {self.ip}:{self.port}...")
             self.session = qi.Session()
             self.session.connect(f"tcp://{self.ip}:{self.port}")
             self.video_proxy = self.session.service("ALVideoDevice")
             logger.info("✓ Video service connected successfully")
-        except qi.Exception as e:
+        except Exception as e:
             logger.error(f"Failed to connect to video service: {e}")
+            logger.error("Video streaming will be disabled")
             raise
 
     def _setup_routes(self):
@@ -51,7 +60,10 @@ class VideoStreamer:
         return {"status": "ok", "camera_id": self.camera_id}
 
     def _subscribe_camera(self):
-        """Subscribe to Pepper's camera feed."""
+        """
+        Subscribe to Pepper's camera feed.
+        FIXED: Better error handling.
+        """
         try:
             self.subscriber_id = self.video_proxy.subscribeCamera(
                 "vr_stream", self.camera_id, self.resolution, self.colorspace, self.fps
@@ -62,20 +74,34 @@ class VideoStreamer:
             raise
 
     def _unsubscribe_camera(self):
-        """Unsubscribe from camera feed."""
+        """
+        Unsubscribe from camera feed.
+        FIXED: Better error handling.
+        """
         if self.subscriber_id:
             try:
                 self.video_proxy.unsubscribe(self.subscriber_id)
                 logger.info("✓ Unsubscribed from camera")
+                self.subscriber_id = None
             except Exception as e:
                 logger.warning(f"Error unsubscribing from camera: {e}")
 
     def _generate_frames(self):
-        """Generator function that yields video frames."""
-        self._subscribe_camera()
+        """
+        Generator function that yields video frames.
+        FIXED: Better error handling, resource cleanup, memory management.
+        """
+        # Subscribe to camera first
+        try:
+            self._subscribe_camera()
+        except Exception as e:
+            logger.error(f"Failed to start frame generation: {e}")
+            return
+        
         try:
             while True:
                 try:
+                    # Get image from Pepper
                     img_data = self.video_proxy.getImageRemote(self.subscriber_id)
                     if img_data is None:
                         logger.warning("Received None from camera")
@@ -90,7 +116,12 @@ class VideoStreamer:
                     frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
                     # Encode frame as JPEG
-                    (flag, encoded_image) = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    (flag, encoded_image) = cv2.imencode(
+                        ".jpg", 
+                        frame_bgr, 
+                        [cv2.IMWRITE_JPEG_QUALITY, 85]
+                    )
+                    
                     if not flag:
                         logger.warning("Failed to encode frame")
                         continue
@@ -99,12 +130,19 @@ class VideoStreamer:
                     yield (b'--frame\r\n'
                            b'Content-Type: image/jpeg\r\n\r\n' + 
                            bytearray(encoded_image) + b'\r\n')
+                    
+                    # FIXED: Explicit cleanup for memory management
+                    del frame, frame_bgr, encoded_image
                            
+                except KeyboardInterrupt:
+                    logger.info("Frame generation interrupted")
+                    break
                 except Exception as e:
                     logger.error(f"Error generating frame: {e}")
                     break
                     
         finally:
+            # FIXED: Always unsubscribe, even on error
             self._unsubscribe_camera()
 
     def _video_feed_handler(self):
@@ -122,6 +160,11 @@ class VideoStreamer:
             self.app.run(host=host, port=port, debug=False, threaded=True)
         except KeyboardInterrupt:
             logger.info("Video server stopped by user")
+        except Exception as e:
+            logger.error(f"Video server error: {e}")
         finally:
             if self.session:
-                self.session.close()
+                try:
+                    self.session.close()
+                except:
+                    pass
